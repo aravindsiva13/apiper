@@ -69,12 +69,14 @@ router.patch(
 // ==========================================
 // Metrics Routes
 // ==========================================
+
+router.get("/metrics/summary", authenticate, apiController.getMetricsSummary);
+
 router.get(
   "/metrics/:endpointId",
   authenticate,
   apiController.getEndpointMetrics
 );
-router.get("/metrics/summary", authenticate, apiController.getMetricsSummary);
 
 // ==========================================
 // Incident Routes
@@ -140,5 +142,42 @@ router.get(
   apiController.getAllUsers
 );
 router.put("/users/:id", authenticate, apiController.updateUser);
+// ==========================================
+// health score  Routes
+// ==========================================
 
+router.get(
+  "/metrics/:endpointId/health",
+  authenticate,
+  apiController.getEndpointHealthScore
+);
+
+// ==========================================
+// Security  Routes
+// ==========================================
+
+router.get("/security/alerts", authenticate, apiController.getSecurityAlerts);
+router.get(
+  "/security/overview",
+  authenticate,
+  apiController.getSecurityOverview
+);
+router.patch(
+  "/security/alerts/:id/status",
+  authenticate,
+  authorize(["ADMIN", "USER"]),
+  apiController.updateSecurityAlertStatus
+);
+router.post(
+  "/security/start",
+  authenticate,
+  authorize(["ADMIN"]),
+  apiController.startSecurityMonitoring
+);
+router.post(
+  "/security/stop",
+  authenticate,
+  authorize(["ADMIN"]),
+  apiController.stopSecurityMonitoring
+);
 module.exports = router;

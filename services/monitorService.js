@@ -794,6 +794,94 @@ class MonitorService {
       throw error;
     }
   }
+
+  async calculateEndpointHealthScore(endpointId) {
+    try {
+      const endpoint = await Endpoint.findByPk(endpointId);
+      if (!endpoint) {
+        throw new Error("Endpoint not found");
+      }
+
+      // Get metrics from the last 24 hours
+      const oneDayAgo = moment().subtract(1, "day").toDate();
+      const metrics = await Metric.findAll({
+        where: {
+          endpointId,
+          timestamp: { [Op.gte]: oneDayAgo },
+        },
+      });
+
+      if (metrics.length === 0) {
+        return { score: null, details: "No data available" };
+      }
+
+      // Calculate components of health score
+
+      // 1. Availability (40% of score)
+      const successfulRequests = metrics.filter((m) => m.success).length;
+      const availabilityScore = (successfulRequests / metrics.length) * 40;
+
+      // 2. Response time (30% of score)
+      const avgResponseTime =
+        metrics.reduce((sum, m) => sum + (m.responseTime || 0), 0) /
+        metrics.length;
+      const responseTimeRatio = Math.min(
+        1,
+        endpoint.responseTimeThreshold / (avgResponseTime || 1)
+      );
+      const responseTimeScore = responseTimeRatio * 30;
+
+      // 3. Error rate (20% of score)
+      const errorRate =
+        ((metrics.length - successfulRequests) / metrics.length) * 100;
+      const errorRateRatio = Math.min(
+        1,
+        endpoint.errorRateThreshold / (errorRate || 0.1)
+      );
+      const errorRateScore = errorRateRatio * 20;
+
+      // 4. Stability (10% of score) - variation in response times
+      const responseTimeValues = metrics
+        .map((m) => m.responseTime || 0)
+        .filter((t) => t > 0);
+
+      // Calculate standard deviation directly instead of using helper function
+      const responseTimeAvg =
+        responseTimeValues.reduce((sum, val) => sum + val, 0) /
+        responseTimeValues.length;
+      const squareDiffs = responseTimeValues.map((value) =>
+        Math.pow(value - responseTimeAvg, 2)
+      );
+      const avgSquareDiff =
+        squareDiffs.reduce((sum, val) => sum + val, 0) / squareDiffs.length;
+      const stdDeviation = Math.sqrt(avgSquareDiff);
+
+      const variabilityRatio = Math.min(1, 100 / (stdDeviation || 1));
+      const stabilityScore = variabilityRatio * 10;
+
+      // Calculate total score
+      const totalScore = Math.round(
+        availabilityScore + responseTimeScore + errorRateScore + stabilityScore
+      );
+
+      return {
+        score: totalScore,
+        details: {
+          availability: Math.round(availabilityScore / 0.4), // Convert back to percentage
+          responseTime: Math.round(avgResponseTime),
+          errorRate: Math.round(errorRate * 10) / 10, // One decimal point
+          stability: Math.round(100 - (stdDeviation / avgResponseTime) * 100),
+          metrics: metrics.length,
+        },
+      };
+    } catch (error) {
+      console.error(
+        `Error calculating health score for endpoint ${endpointId}:`,
+        error
+      );
+      throw error;
+    }
+  }
 }
 
 // Create singleton instance

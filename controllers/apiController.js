@@ -17,6 +17,7 @@ const {
   SystemStatus,
 } = require("../models");
 const monitorService = require("../services/monitorService");
+const securityMonitorService = require("../services/securityMonitorService");
 
 // ==========================================
 // Authentication Controllers
@@ -381,6 +382,8 @@ const getMetricsSummary = async (req, res, next) => {
     // Get time range from query
     const { timeRange = "24h" } = req.query;
 
+    console.log(`Processing metrics summary for timeRange: ${timeRange}`);
+
     // Parse time range
     const timeParts = timeRange.match(/^(\d+)([hdwmy])$/);
     if (!timeParts) {
@@ -415,21 +418,34 @@ const getMetricsSummary = async (req, res, next) => {
     }
 
     const startTime = moment().subtract(value, timeUnit).toDate();
+    console.log(`Start time for metrics: ${startTime}`);
 
     // Get endpoints
     const endpoints = await Endpoint.findAll({
       where: { isActive: true },
     });
 
+    console.log(`Found ${endpoints.length} active endpoints`);
+
     // Get metrics for each endpoint
-    const endpointMetrics = await Promise.all(
-      endpoints.map(async (endpoint) => {
+    const endpointMetrics = [];
+    for (const endpoint of endpoints) {
+      try {
+        console.log(
+          `Processing metrics for endpoint ${endpoint.id}: ${endpoint.method} ${endpoint.path}`
+        );
+
+        // Get metrics for this endpoint
         const metrics = await Metric.findAll({
           where: {
             endpointId: endpoint.id,
             timestamp: { [Op.gte]: startTime },
           },
         });
+
+        console.log(
+          `Found ${metrics.length} metrics for endpoint ${endpoint.id}`
+        );
 
         // Calculate statistics
         const totalRequests = metrics.length;
@@ -442,7 +458,48 @@ const getMetricsSummary = async (req, res, next) => {
           ? (successfulRequests / totalRequests) * 100
           : 100;
 
-        return {
+        // Generate time points
+        const timePoints = [];
+        const responseTimeSeries = [];
+        const successRateSeries = [];
+
+        // Get the last 24 hours in hourly intervals
+        for (let i = 23; i >= 0; i--) {
+          const hourTime = moment().subtract(i, "hours").format("HH:mm");
+          timePoints.push(hourTime);
+
+          // Calculate metrics for this hour
+          const hourStart = moment()
+            .subtract(i + 1, "hours")
+            .toDate();
+          const hourEnd = moment().subtract(i, "hours").toDate();
+
+          const hourMetrics = metrics.filter(
+            (m) =>
+              new Date(m.timestamp) >= hourStart &&
+              new Date(m.timestamp) < hourEnd
+          );
+
+          if (hourMetrics.length > 0) {
+            const hourAvgResponseTime =
+              hourMetrics.reduce((sum, m) => sum + (m.responseTime || 0), 0) /
+              hourMetrics.length;
+            const hourSuccessfulRequests = hourMetrics.filter(
+              (m) => m.success
+            ).length;
+            const hourSuccessRate =
+              (hourSuccessfulRequests / hourMetrics.length) * 100;
+
+            responseTimeSeries.push(Math.round(hourAvgResponseTime));
+            successRateSeries.push(parseFloat(hourSuccessRate.toFixed(2)));
+          } else {
+            // No data for this hour
+            responseTimeSeries.push(null);
+            successRateSeries.push(null);
+          }
+        }
+
+        endpointMetrics.push({
           id: endpoint.id,
           path: endpoint.path,
           method: endpoint.method,
@@ -454,28 +511,38 @@ const getMetricsSummary = async (req, res, next) => {
               successRate >= endpoint.availabilityThreshold
                 ? "healthy"
                 : "degraded",
+            timePoints,
+            responseTimeSeries,
+            successRateSeries,
           },
-        };
-      })
-    );
+        });
+      } catch (endpointError) {
+        console.error(
+          `Error processing endpoint ${endpoint.id}:`,
+          endpointError
+        );
+        // Continue with next endpoint instead of failing the whole request
+      }
+    }
 
     // Calculate overall statistics
-    const totalRequests = endpointMetrics.reduce(
-      (sum, endpoint) => sum + endpoint.metrics.totalRequests,
-      0
-    );
-    const totalSuccessRate = endpointMetrics.length
-      ? endpointMetrics.reduce(
-          (sum, endpoint) => sum + endpoint.metrics.successRate,
-          0
-        ) / endpointMetrics.length
-      : 100;
-    const avgResponseTime = endpointMetrics.length
-      ? endpointMetrics.reduce(
-          (sum, endpoint) => sum + endpoint.metrics.avgResponseTime,
-          0
-        ) / endpointMetrics.length
-      : 0;
+    let totalRequests = 0;
+    let totalSuccessRequests = 0;
+    let totalResponseTime = 0;
+
+    endpointMetrics.forEach((endpoint) => {
+      totalRequests += endpoint.metrics.totalRequests;
+      totalSuccessRequests += Math.round(
+        (endpoint.metrics.totalRequests * endpoint.metrics.successRate) / 100
+      );
+      totalResponseTime +=
+        endpoint.metrics.avgResponseTime * endpoint.metrics.totalRequests;
+    });
+
+    const overallSuccessRate =
+      totalRequests > 0 ? (totalSuccessRequests / totalRequests) * 100 : 100;
+    const overallAvgResponseTime =
+      totalRequests > 0 ? totalResponseTime / totalRequests : 0;
 
     return res.status(StatusCodes.OK).json({
       success: true,
@@ -483,12 +550,12 @@ const getMetricsSummary = async (req, res, next) => {
         timeRange,
         overall: {
           totalRequests,
-          successRate: parseFloat(totalSuccessRate.toFixed(2)),
-          avgResponseTime: Math.round(avgResponseTime),
+          successRate: parseFloat(overallSuccessRate.toFixed(2)),
+          avgResponseTime: Math.round(overallAvgResponseTime),
           status:
-            totalSuccessRate >= 99
+            overallSuccessRate >= 99
               ? "healthy"
-              : totalSuccessRate >= 95
+              : overallSuccessRate >= 95
               ? "degraded"
               : "critical",
         },
@@ -496,7 +563,12 @@ const getMetricsSummary = async (req, res, next) => {
       },
     });
   } catch (error) {
-    next(error);
+    console.error("Error in getMetricsSummary:", error);
+    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      success: false,
+      message: "Failed to fetch metrics summary",
+      error: process.env.NODE_ENV === "development" ? error.message : undefined,
+    });
   }
 };
 
@@ -972,6 +1044,192 @@ const updateUser = async (req, res, next) => {
   }
 };
 
+/**
+ * Get health score for an endpoint
+ * @route GET /api/metrics/:endpointId/health
+ */
+const getEndpointHealthScore = async (req, res, next) => {
+  try {
+    const { endpointId } = req.params;
+
+    // Calculate health score
+    const healthScore = await monitorService.calculateEndpointHealthScore(
+      endpointId
+    );
+
+    return res.status(StatusCodes.OK).json({
+      success: true,
+      data: healthScore,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Get security alerts
+ * @route GET /api/security/alerts
+ */
+
+const getSecurityAlerts = async (req, res, next) => {
+  try {
+    // Get query params
+    const { status, type, endpointId, limit = 20, offset = 0 } = req.query;
+
+    // Prepare query
+    const query = {};
+    if (status) {
+      query.status = status.toUpperCase();
+    }
+    if (type) {
+      query.type = type.toUpperCase();
+    }
+    if (endpointId) {
+      query.endpointId = endpointId;
+    }
+
+    try {
+      // Get alerts with proper includes
+      const alerts = await SecurityAlert.findAndCountAll({
+        where: query,
+        include: [
+          {
+            model: Endpoint,
+            attributes: ["path", "method"],
+          },
+        ],
+        order: [["timestamp", "DESC"]],
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+      });
+
+      // Convert Sequelize instances to plain objects
+      const plainAlerts = alerts.rows.map((alert) => {
+        const plainAlert = alert.get({ plain: true });
+        // Ensure any nested relations are properly formatted
+        return plainAlert;
+      });
+
+      return res.status(StatusCodes.OK).json({
+        success: true,
+        count: alerts.count,
+        data: plainAlerts,
+      });
+    } catch (dbError) {
+      console.error("Database error in security alerts:", dbError);
+
+      // Return empty data with success status
+      return res.status(StatusCodes.OK).json({
+        success: true,
+        count: 0,
+        data: [],
+        message: "Error retrieving alerts",
+      });
+    }
+  } catch (error) {
+    next(error);
+  }
+};
+/**
+ * Get security overview
+ * @route GET /api/security/overview
+ */
+const getSecurityOverview = async (req, res, next) => {
+  try {
+    const overview = await securityMonitorService.getSecurityOverview();
+
+    return res.status(StatusCodes.OK).json({
+      success: true,
+      data: overview,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Update security alert status
+ * @route PATCH /api/security/alerts/:id/status
+ */
+const updateSecurityAlertStatus = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    // Validate status
+    if (
+      !["NEW", "ACKNOWLEDGED", "RESOLVED", "FALSE_POSITIVE"].includes(status)
+    ) {
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        success: false,
+        message:
+          "Invalid status. Must be one of: NEW, ACKNOWLEDGED, RESOLVED, FALSE_POSITIVE",
+      });
+    }
+
+    const alert = await securityMonitorService.updateAlertStatus(
+      id,
+      status,
+      req.user?.username || "System"
+    );
+
+    return res.status(StatusCodes.OK).json({
+      success: true,
+      message: `Security alert status updated to ${status}`,
+      data: alert,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Start security monitoring
+ * @route POST /api/security/start
+ */
+const startSecurityMonitoring = async (req, res, next) => {
+  try {
+    const success = await securityMonitorService.start();
+
+    if (!success) {
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        success: false,
+        message: "Failed to start security monitoring service",
+      });
+    }
+
+    return res.status(StatusCodes.OK).json({
+      success: true,
+      message: "Security monitoring service started",
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Stop security monitoring
+ * @route POST /api/security/stop
+ */
+const stopSecurityMonitoring = async (req, res, next) => {
+  try {
+    const success = securityMonitorService.stop();
+
+    if (!success) {
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        success: false,
+        message: "Failed to stop security monitoring service",
+      });
+    }
+
+    return res.status(StatusCodes.OK).json({
+      success: true,
+      message: "Security monitoring service stopped",
+    });
+  } catch (error) {
+    next(error);
+  }
+};
 // ==========================================
 // Export Controllers
 // ==========================================
@@ -1013,4 +1271,15 @@ module.exports = {
   // User Management
   getAllUsers,
   updateUser,
+
+  // health score
+  getEndpointHealthScore,
+
+  // Security Monitor
+
+  getSecurityAlerts,
+  getSecurityOverview,
+  updateSecurityAlertStatus,
+  startSecurityMonitoring,
+  stopSecurityMonitoring,
 };

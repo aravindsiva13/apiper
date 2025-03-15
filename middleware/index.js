@@ -71,6 +71,7 @@ const authenticate = async (req, res, next) => {
   try {
     // Get token from authorization header
     const authHeader = req.headers.authorization;
+    console.log("Auth header:", authHeader);
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return res.status(StatusCodes.UNAUTHORIZED).json({
         success: false,

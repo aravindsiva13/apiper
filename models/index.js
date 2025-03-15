@@ -358,6 +358,66 @@ const SystemStatus = sequelize.define("SystemStatus", {
 });
 
 // ==========================================
+// Security Alert Model
+// ==========================================
+
+const SecurityAlert = sequelize.define("SecurityAlert", {
+  id: {
+    type: DataTypes.INTEGER,
+    primaryKey: true,
+    autoIncrement: true,
+  },
+  endpointId: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    references: {
+      model: Endpoint,
+      key: "id",
+    },
+  },
+  type: {
+    type: DataTypes.ENUM(
+      "VULNERABILITY",
+      "RATE_LIMIT",
+      "AUTH_FAILURE",
+      "SENSITIVE_DATA"
+    ),
+    allowNull: false,
+  },
+  severity: {
+    type: DataTypes.ENUM("LOW", "MEDIUM", "HIGH", "CRITICAL"),
+    allowNull: false,
+    defaultValue: "MEDIUM",
+  },
+  message: {
+    type: DataTypes.TEXT,
+    allowNull: false,
+  },
+  details: {
+    type: DataTypes.JSON,
+    allowNull: true,
+  },
+  timestamp: {
+    type: DataTypes.DATE,
+    allowNull: false,
+    defaultValue: DataTypes.NOW,
+  },
+  status: {
+    type: DataTypes.ENUM("NEW", "ACKNOWLEDGED", "RESOLVED", "FALSE_POSITIVE"),
+    allowNull: false,
+    defaultValue: "NEW",
+  },
+  resolvedBy: {
+    type: DataTypes.STRING(100),
+    allowNull: true,
+  },
+  resolvedAt: {
+    type: DataTypes.DATE,
+    allowNull: true,
+  },
+});
+
+// ==========================================
 // Define Relationships
 // ==========================================
 
@@ -377,6 +437,13 @@ Alert.belongsTo(Endpoint, { foreignKey: "endpointId" });
 Incident.hasMany(Alert, { foreignKey: "incidentId", onDelete: "SET NULL" });
 Alert.belongsTo(Incident, { foreignKey: "incidentId" });
 
+// SecurityAlert to Endpoint (One-to-Many)
+Endpoint.hasMany(SecurityAlert, {
+  foreignKey: "endpointId",
+  onDelete: "CASCADE",
+});
+SecurityAlert.belongsTo(Endpoint, { foreignKey: "endpointId" });
+
 // ==========================================
 // Export models
 // ==========================================
@@ -387,4 +454,5 @@ module.exports = {
   Alert,
   User,
   SystemStatus,
+  SecurityAlert,
 };
